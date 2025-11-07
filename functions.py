@@ -281,9 +281,6 @@ def compute_diagnostics(xs, sol_y, params):
     rhoh = rho_i_exact(nchi, mchi, Th) + rho_i_exact(nA, mA, Th)
     H    = H_of_T(T, rhoh if include_h else 0.0, t_dep=t_dep)
 
-    # Equilibria at HS temperature
-   #nxeq_Th = neq(mchi, gchi, Th)
-    #naeq_Th = neq(mA,   gA,   Th)
 
     nxeq_Th = neq_stable(mchi, gchi, Th)
     naeq_Th = neq_stable(mA,   gA,   Th)
