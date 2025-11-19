@@ -157,11 +157,28 @@ def dTh_dt_rel(nchi, nA, Th, mchi, mA, H, rhoh, Ph, Qh, dnchi_dt, dnA_dt):
 
 
 
+def n_rel_fermion_FD(T, g):
+    # relativistic fermion number density
+    return (3.0*float(zeta(3))/(4.0*np.pi**2)) * g * T**3  # g=4 for e± total
+
+def sigma_mt_chi_e(alphaD, epsilon, mA, T):
+    # momentum-transfer xsec with thermal screening q_th^2 ~ 3 m_e T
+    q2 = 3.0*ME*T
+    denom = (mA*mA + q2)**2
+    return 16.0*np.pi*alphaD*ALPHA_EM*(epsilon**2)/denom
+
+def gamma_kin(alphaD, epsilon, mA, mchi, T):
+    # per-chi kinetic coupling rate
+    ne = n_rel_fermion_FD(T, g=4.0)
+    return (2.0*ME/mchi) * ne * sigma_mt_chi_e(alphaD, epsilon, mA, T)
+
+
+
 def collisions(params, nchi, nA, T, Th):
     mchi = params["mchi"]; mA = params["mA"]
     gchi = params["gchi"]; gA = params["gA"]
     sv_xxee = params["sv_xxee"]; sv_xxAA = params["sv_xxAA"]
-    gamma_Aee = params["gamma_Aee"]
+    gamma_Aee = params["gamma_Aee"]; alphaD = params["alphaD"]; epsilon = params["epsilon"]
 
     # log equilibrium densities (SM at T, HS at Th)
     ln_nchi_eq_SM = ln_neq(mchi, gchi, T)
@@ -191,8 +208,22 @@ def collisions(params, nchi, nA, T, Th):
 
     # Energy transfer eqns
     Q_ann = -0.5 * mchi * sv_xxee * (nchi**2 - nchi_eq_SM**2)
-    Q_dec = - mA   * gamma_Aee * (nA - nA_eq_SM)  #no lorentz factor here
-    Q_h   = Q_ann + Q_dec
+    Q_dec = - mA  * gamma_Aee * (nA - nA_eq_SM)  #no lorentz factor here
+
+    #nf = n_rel_fermion_FD(T, 4.0)  # relativistic e+e- number density at SM T
+
+    if params.get("elastic", False) and T > 0.1*ME:
+        Gkin = gamma_kin(alphaD, epsilon, mA, mchi, T)
+        # thermodynamics of HS
+        rhoh = rho_i_exact(nchi, mchi, Th) + rho_i_exact(nA, mA, Th)
+        Ph   = P_i_exact(nchi, Th)       + P_i_exact(nA, Th)
+        Q_el = Gkin * (rhoh + Ph) * (T - Th) / max(Th, VAL_FLOOR)
+    else:
+        Q_el = 0.0
+
+
+
+    Q_h   = Q_ann + Q_dec + Q_el
 
     return C_chi, C_A, Q_h
 
@@ -249,9 +280,9 @@ def rhs_logx(x, u, params):
     dTh_dx   = dTh_dt   /xdot
 
     # Return log-derivatives
-    dln_nchi_dx = dnchi_dx / nchi
-    dln_nA_dx   = dnA_dx / nA
-    dln_Th_dx   = dTh_dx / Th
+    dln_nchi_dx = dnchi_dx / np.maximum(nchi, VAL_FLOOR)
+    dln_nA_dx   = dnA_dx / np.maximum(nA, VAL_FLOOR)
+    dln_Th_dx   = dTh_dx / np.maximum(Th, VAL_FLOOR)
 
     return np.array([dln_nchi_dx, dln_nA_dx, dln_Th_dx])
 
@@ -286,12 +317,14 @@ def compute_diagnostics(xs, sol_y, params):
     naeq_Th = neq_stable(mA,   gA,   Th)
 
     # Per-particle reaction rates (no cancellation)
-    Gamma_xAA_over_H = (sv_xxAA * nchi) / H
-    Gamma_xSM_over_H = (sv_xxee * nchi) / H
+    Gamma_xAA_over_H = (sv_xxAA * nchi**2) / H
+    Gamma_xSM_over_H = (sv_xxee * nchi**2) / H
     zA = mA / np.maximum(Th, VAL_FLOOR)
     lorentz = kve(1, zA) / np.maximum(kve(2, zA), VAL_FLOOR)
-    Gamma_Adec_over_H = (gammaA * lorentz) / H
-    Gamma_Adec_over_H_no_lorentz = (gammaA) / H
+    Gamma_Adec_over_H = (gammaA * lorentz) * (nA / np.maximum(nA, VAL_FLOOR)) / H
+
+    # Q_elastic = -sigmav_deltaE_rel(params["alphaD"], params["epsilon"], mA, mchi, T, Th)*n_rel_fermion_FD(T, 4.0) *nchi
+    # Q_el_over_Hrho = np.abs(Q_elastic) / np.maximum(H * rhoh, VAL_FLOOR)
 
     # collision terms + energy transfer
     Cchi = np.empty_like(xs); CA = np.empty_like(xs); Qh = np.empty_like(xs)
@@ -315,8 +348,9 @@ def compute_diagnostics(xs, sol_y, params):
         "Gamma_xAA_over_H": Gamma_xAA_over_H,
         "Gamma_xSM_over_H": Gamma_xSM_over_H,
         "Gamma_Adec_over_H": Gamma_Adec_over_H,
-        "Gamma_Adec_over_H_no_lorentz": Gamma_Adec_over_H_no_lorentz,
         "Gamma_chem_over_H": Gamma_chem_over_H,
+
+        #"Q_el_over_Hrho": Q_el_over_Hrho,
 
         "C_over_3Hn_chi": C_over_3Hn_chi,
         "C_over_3Hn_A": C_over_3Hn_A,
@@ -330,16 +364,17 @@ def compute_diagnostics(xs, sol_y, params):
     }
 
 
-def evolve(params, x_initial, x_final, y0, xs, log_space = False):
+def evolve(params, x_initial, x_final, y0, xs, log_space = False, rtol = 1e-7, atol=1e-14):
     if log_space:
         u0 = np.log(y0)
-        sol = solve_ivp(rhs_logx, (x_initial, x_final), u0, args = (params,), t_eval=xs, method="Radau", rtol=1e-7, atol=1e-14) #, max_step=0.5)
-        diag = compute_diagnostics(sol.t, sol.y, params)
+        sol = solve_ivp(rhs_logx, (x_initial, x_final), u0, args = (params,), t_eval=xs, method="Radau", rtol=rtol, atol=atol) #, max_step=0.5)
     #else:
         #sol = solve_ivp(rhs_x, (x_initial, x_final), y0, args = (params,), t_eval=xs, method="Radau", rtol=1e-7, atol=1e-12, max_step=0.5)
     if not sol.success:
         raise RuntimeError(f"Integration failed: {sol.message}")
-    x_arr = sol.t
+    else:
+        x_arr = sol.t
+        diag = compute_diagnostics(x_arr, sol.y, params)
     if log_space:
         soly = np.exp(sol.y)
     else:
