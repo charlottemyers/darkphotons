@@ -18,10 +18,11 @@ GSTAR_S = 90.0
 ME = 0.000511e-3  # GeV
 ALPHA_EM = 1.0/137.0
 MPL   = 1.2209e19
+INCLUDE_HS_IN_H = True
 
 
-LOG_TINY = -745.0      # ~ log(np.finfo(float).tiny)
-VAL_FLOOR = 1e-300     # positive floor
+LOG_TINY = -80     # ~ log(np.finfo(float).tiny)
+VAL_FLOOR = 1e-100     # positive floor
 ######
 
 def gstar_interp(T, path = "/Users/charlottemyers/projects/ctp/heffBW.dat"):
@@ -53,20 +54,18 @@ def returnk (T, path = "/Users/charlottemyers/projects/ctp/heffBW.dat"):
 # ----------------------------
 # Entropy functions
 # ----------------------------
-def gstar_SM(T, t_dep = False):
+def gstar_SM(T, t_dep = True):
     if t_dep:
         gstar_s = gstar_interp(T)
     else:
         gstar_s = GSTAR_S
     return  gstar_s
-    #return GSTAR
 
-def gstars_SM(T, t_dep = False):
+def gstars_SM(T, t_dep = True):
     return gstar_SM(T, t_dep)
-    #return GSTAR_S
 
 
-def dln_gstars_SM_dlnT(T, t_dep = False, delta=1e-6):
+def dln_gstars_SM_dlnT(T, t_dep = True, delta=1e-2):
     """Numerical derivative of ln(g*_s) w.r.t. ln(T)."""
     if t_dep:
         gstar_plus = gstar_interp(T * (1.0 + delta))
@@ -76,15 +75,45 @@ def dln_gstars_SM_dlnT(T, t_dep = False, delta=1e-6):
         return 0
 
 
-# ----------------------------
-# Helper thermo stuff
-# ----------------------------
+## ----------------------------
+# Elastic scattering stuff
+##----------------------------
+
+def sigmav_deltaE_rel(alphaD, epsilon, mA, mchi, T, Th):
+    r  = mA / mchi
+    x  = mchi / T
+    C  = (8.0/np.pi) * ALPHA_EM * alphaD * (epsilon**2)
+    K  = factorial(6) * (1.0 - 2.0**-5) * float(zeta(6))  # 6!(1-2^-5)ζ(6)
+    return C * K * (Th - T) / (r**4 * x**6)
+
+def sigmav_deltaE(alphaD, epsilon, r, x, TSM, Th):
+    """elastic scattering xsec'"""
+    term1 = (8/np.pi)*ALPHA_EM*alphaD*epsilon**2/(r**4 * x**6)
+    term2 = factorial(6)*(1 - 2**(-5))*zeta(6)*(Th - TSM)
+    return term1 * term2
 
 
-def dx_dt(T, H, m, t_dep = False):
+## ----------------------------
+# Thermo stuff
+## ----------------------------
+
+def H_of_T(T, rho_h=0.0, t_dep = True, include_hs = True):
+    """Hubble from SM  + HS """
+    ## typically by freezeout, all radiation energy has been deposited into non-rel species
+    ## technically more correct to include
+    rho_SM = (np.pi**2/30.0) * gstar_SM(T, t_dep) * T**4
+    if include_hs:
+        rho_tot = rho_SM + rho_h
+    else:
+        rho_tot = rho_SM
+    return np.sqrt((8.0*np.pi/3.0) * rho_tot) / MPL
+
+
+
+def dx_dt(T, H, m, t_dep = True, delta = 1e-6):
     """dx/dt for x = mchi / T."""
     x = m / T
-    corr = 1.0 + (1.0/3.0) * dln_gstars_SM_dlnT(T, t_dep)
+    corr = 1.0 + (1.0/3.0) * dln_gstars_SM_dlnT(T, t_dep, delta)
     return H * x / corr
 
 
@@ -107,7 +136,6 @@ def P_i_exact(n_i, Th):
     # source: 2504.00077, eqn 2.15
     # MB equation of state is ideal-gas exactly: P = n T
     return n_i * Th
-
 
 
 def safe_exp(logx):
@@ -159,19 +187,18 @@ def dTh_dt_rel(nchi, nA, Th, mchi, mA, H, rhoh, Ph, Qh, dnchi_dt, dnA_dt):
 
 def n_rel_fermion_FD(T, g):
     # relativistic fermion number density
-    return (3.0*float(zeta(3))/(4.0*np.pi**2)) * g * T**3  # g=4 for e± total
+    return (3.0*float(zeta(3))/(4.0*np.pi**2)) * g * T**3  # g=4 for e+ and e- total
 
 def sigma_mt_chi_e(alphaD, epsilon, mA, T):
-    # momentum-transfer xsec with thermal screening q_th^2 ~ 3 m_e T
+    # momentum-transfer xsec w/ thermal screening (assuming q_th^2 ~ 3 m_e T)
     q2 = 3.0*ME*T
     denom = (mA*mA + q2)**2
     return 16.0*np.pi*alphaD*ALPHA_EM*(epsilon**2)/denom
 
 def gamma_kin(alphaD, epsilon, mA, mchi, T):
     # per-chi kinetic coupling rate
-    ne = n_rel_fermion_FD(T, g=4.0)
+    ne = n_rel_fermion_FD(T, g=4.0) # 4 dof because I include e+ and e-
     return (2.0*ME/mchi) * ne * sigma_mt_chi_e(alphaD, epsilon, mA, T)
-
 
 
 def collisions(params, nchi, nA, T, Th):
@@ -212,32 +239,20 @@ def collisions(params, nchi, nA, T, Th):
 
     #nf = n_rel_fermion_FD(T, 4.0)  # relativistic e+e- number density at SM T
 
-    if params.get("elastic", False) and T > 0.1*ME:
+    if params.get("elastic", False): # and T > 0.1*ME:
         Gkin = gamma_kin(alphaD, epsilon, mA, mchi, T)
         # thermodynamics of HS
+
         rhoh = rho_i_exact(nchi, mchi, Th) + rho_i_exact(nA, mA, Th)
         Ph   = P_i_exact(nchi, Th)       + P_i_exact(nA, Th)
         Q_el = Gkin * (rhoh + Ph) * (T - Th) / max(Th, VAL_FLOOR)
     else:
+        Gkin = 0.0
         Q_el = 0.0
-
-
 
     Q_h   = Q_ann + Q_dec + Q_el
 
-    return C_chi, C_A, Q_h
-
-
-def H_of_T(T, rho_h=0.0, t_dep = False, include_hs = True):
-    """Hubble from SM  + HS """
-    ## typically by freezeout, all radiation energy has been deposited into non-rel species
-    ## technically more correct to include
-    rho_SM = (np.pi**2/30.0) * gstar_SM(T, t_dep) * T**4
-    if include_hs:
-        rho_tot = rho_SM + rho_h
-    else:
-        rho_tot = rho_SM
-    return np.sqrt((8.0*np.pi/3.0) * rho_tot) / MPL
+    return C_chi, C_A, Q_h, Q_ann, Q_dec, Q_el, Gkin
 
 
 
@@ -249,26 +264,33 @@ def rhs_logx(x, u, params):
     log-space RHS:
       u = [ln n_chi, ln n_Ap, ln Th]. returns d/dx of those logs
     """
-    ln_nchi, ln_nA, ln_Th  = u
-    nchi = np.exp(ln_nchi)
-    nA   = np.exp(ln_nA)
-    Th   = np.exp(ln_Th)
 
     mchi = params["mchi"];  mA = params["mA"]
     t_dep = params.get("t_dep", True)
     include_h = params.get("include_hs_in_H", True)
     T    = mchi / x # SM temperature ('convenient monotonic variable')
 
+    ln_nchi, ln_nA, ln_Th  = u
+    nchi = safe_exp(ln_nchi) # represents nchi + bar_nchi
+    nA   = safe_exp(ln_nA)
+    #Th   = np.exp(ln_Th)
+
+    if params.get("no_Th_evolution", False):
+        Th = T
+    else:
+        Th = safe_exp(ln_Th)
+
     # HS energy density and pressure
     rhoh = rho_i_exact(nchi, mchi, Th) + rho_i_exact(nA, mA, Th)
     Ph = P_i_exact(nchi, Th) + P_i_exact(nA, Th)
 
     # Hubble and x-dot
+    delta = params.get("delta_dxdt", 1e-2)
     H    = H_of_T(T, rhoh if include_h else 0.0, t_dep = t_dep)
-    xdot = dx_dt(T, H, m = mchi, t_dep = t_dep)
+    xdot = dx_dt(T, H, m = mchi, t_dep = t_dep, delta = delta)
 
     # collisions
-    C_chi, C_A, Qh = collisions(params, nchi, nA, T, Th)
+    C_chi, C_A, Qh, _, _, _, _ = collisions(params, nchi, nA, T, Th)
 
     # Time derivatives for number rxns
     dnchi_dt = -3.0 * H * nchi + C_chi
@@ -284,6 +306,9 @@ def rhs_logx(x, u, params):
     dln_nA_dx   = dnA_dx / np.maximum(nA, VAL_FLOOR)
     dln_Th_dx   = dTh_dx / np.maximum(Th, VAL_FLOOR)
 
+    if params.get("no_Th_evolution", False):
+        dln_Th_dx = -1/x
+
     return np.array([dln_nchi_dx, dln_nA_dx, dln_Th_dx])
 
 
@@ -295,7 +320,76 @@ def neq_stable(m, g, T):
           - z + np.log(kve(2, z)))
     return safe_exp(ln)
 
+# def compute_diagnostics(xs, sol_y, params):
+#     ln_nchi, ln_nA, ln_Th = sol_y
+#     nchi = np.exp(ln_nchi); nA = np.exp(ln_nA); Th = np.exp(ln_Th)
+
+#     mchi, mA   = params["mchi"], params["mA"]
+#     gchi = params["gchi"]; gA = params["gA"]
+#     sv_xxAA    = params["sv_xxAA"]; sv_xxee = params["sv_xxee"]
+#     gammaA     = params["gamma_Aee"]
+#     t_dep      = params.get("t_dep", True)
+#     include_h  = params.get("include_hs_in_H", True)
+
+
+#     T   = mchi / xs
+#     # HS thermodynamics
+#     rhoh = rho_i_exact(nchi, mchi, Th) + rho_i_exact(nA, mA, Th)
+#     H    = H_of_T(T, rhoh if include_h else 0.0, t_dep=t_dep)
+
+
+#     nxeq_Th = neq_stable(mchi, gchi, Th)
+#     naeq_Th = neq_stable(mA,   gA,   Th)
+
+#     # Per-particle reaction rates (no cancellation)
+#     Gamma_xAA_over_H = (sv_xxAA * nchi) / H
+#     Gamma_xSM_over_H = (sv_xxee * nchi) / H
+#     zA = mA / np.maximum(Th, VAL_FLOOR)
+#     lorentz = kve(1, zA) / np.maximum(kve(2, zA), VAL_FLOOR)
+#     Gamma_Adec_over_H = (gammaA * lorentz) * (nA / np.maximum(nA, VAL_FLOOR)) / H
+
+#     # Q_elastic = -sigmav_deltaE_rel(params["alphaD"], params["epsilon"], mA, mchi, T, Th)*n_rel_fermion_FD(T, 4.0) *nchi
+#     # Q_el_over_Hrho = np.abs(Q_elastic) / np.maximum(H * rhoh, VAL_FLOOR)
+
+#     # collision terms + energy transfer
+#     Cchi = np.empty_like(xs); CA = np.empty_like(xs); Qh = np.empty_like(xs)
+#     for i in range(xs.size):
+#         Cchi[i], CA[i], Qh[i] = collisions(params, nchi[i], nA[i], T[i], Th[i])
+
+#     # Compete with Hubble dilution
+#     C_over_3Hn_chi = np.abs(Cchi) / np.maximum(3*H*nchi, VAL_FLOOR)
+#     C_over_3Hn_A   = np.abs(CA)   / np.maximum(3*H*nA,   VAL_FLOOR)
+
+#     # energy exchange strength
+#     Q_over_Hrho = np.abs(Qh) / np.maximum(H * rhoh, VAL_FLOOR)
+
+#     dep_chi = np.maximum(nchi / np.maximum(nxeq_Th, VAL_FLOOR), VAL_FLOOR)
+#     dep_A   = np.maximum(nA   / np.maximum(naeq_Th, VAL_FLOOR), VAL_FLOOR)
+
+#     Gamma_chem_over_H = np.abs(Cchi) / (H * np.maximum(np.abs(nchi - nxeq_Th), VAL_FLOOR))
+
+#     return {
+#         "x": xs, "T": T, "Th": Th, "H": H,
+#         "Gamma_xAA_over_H": Gamma_xAA_over_H,
+#         "Gamma_xSM_over_H": Gamma_xSM_over_H,
+#         "Gamma_Adec_over_H": Gamma_Adec_over_H,
+#         "Gamma_chem_over_H": Gamma_chem_over_H,
+
+#         #"Q_el_over_Hrho": Q_el_over_Hrho,
+
+#         "C_over_3Hn_chi": C_over_3Hn_chi,
+#         "C_over_3Hn_A": C_over_3Hn_A,
+#         "Q_over_Hrho": Q_over_Hrho,
+#         "dep_chi": dep_chi,
+#         "dep_A": dep_A,
+
+#         "nchi_over_nchieq": nchi / np.maximum(nxeq_Th, VAL_FLOOR),
+#         "nA_over_nAeq": nA / np.maximum(naeq_Th, VAL_FLOOR),
+#         "params": params,
+#     }
+
 def compute_diagnostics(xs, sol_y, params):
+    # unpack solution (log-space assumed)
     ln_nchi, ln_nA, ln_Th = sol_y
     nchi = np.exp(ln_nchi); nA = np.exp(ln_nA); Th = np.exp(ln_Th)
 
@@ -304,67 +398,80 @@ def compute_diagnostics(xs, sol_y, params):
     sv_xxAA    = params["sv_xxAA"]; sv_xxee = params["sv_xxee"]
     gammaA     = params["gamma_Aee"]
     t_dep      = params.get("t_dep", True)
-    include_h  = params.get("include_hs_in_H", True)
-
+    include_h = params.get("include_hs_in_H", True)
 
     T   = mchi / xs
     # HS thermodynamics
     rhoh = rho_i_exact(nchi, mchi, Th) + rho_i_exact(nA, mA, Th)
-    H    = H_of_T(T, rhoh if include_h else 0.0, t_dep=t_dep)
+    Ph   = P_i_exact(nchi, Th) + P_i_exact(nA, Th)
+    H    = H_of_T(T, rhoh if include_h else 0.0, t_dep = t_dep)
 
+
+    # Equilibria at HS temperature
+    # nxeq_Th = neq(mchi, gchi, Th)
+    # naeq_Th = neq(mA,   gA,   Th)
 
     nxeq_Th = neq_stable(mchi, gchi, Th)
     naeq_Th = neq_stable(mA,   gA,   Th)
 
-    # Per-particle reaction rates (no cancellation)
-    Gamma_xAA_over_H = (sv_xxAA * nchi**2) / H
-    Gamma_xSM_over_H = (sv_xxee * nchi**2) / H
+    # Per-particle reaction rates (no cancellation) -
+    Gamma_xAA_over_H = (sv_xxAA * nchi) / H
+    Gamma_xSM_over_H = (sv_xxee * nchi) / H
     zA = mA / np.maximum(Th, VAL_FLOOR)
     lorentz = kve(1, zA) / np.maximum(kve(2, zA), VAL_FLOOR)
-    Gamma_Adec_over_H = (gammaA * lorentz) * (nA / np.maximum(nA, VAL_FLOOR)) / H
+    Gamma_Adec_over_H = (gammaA * lorentz) / H
 
-    # Q_elastic = -sigmav_deltaE_rel(params["alphaD"], params["epsilon"], mA, mchi, T, Th)*n_rel_fermion_FD(T, 4.0) *nchi
-    # Q_el_over_Hrho = np.abs(Q_elastic) / np.maximum(H * rhoh, VAL_FLOOR)
+    Cchi    = np.empty_like(xs)
+    CA      = np.empty_like(xs)
+    Qh      = np.empty_like(xs)
+    Q_ann   = np.empty_like(xs)
+    Q_dec   = np.empty_like(xs)
+    Q_el    = np.empty_like(xs)
+    Gkin    = np.empty_like(xs)
 
-    # collision terms + energy transfer
-    Cchi = np.empty_like(xs); CA = np.empty_like(xs); Qh = np.empty_like(xs)
     for i in range(xs.size):
-        Cchi[i], CA[i], Qh[i] = collisions(params, nchi[i], nA[i], T[i], Th[i])
+        Cchi[i], CA[i], Qh[i], Q_ann[i], Q_dec[i], Q_el[i], Gkin[i] = collisions(
+            params, nchi[i], nA[i], T[i], Th[i]
+        )
 
-    # Compete with Hubble dilution
-    C_over_3Hn_chi = np.abs(Cchi) / np.maximum(3*H*nchi, VAL_FLOOR)
-    C_over_3Hn_A   = np.abs(CA)   / np.maximum(3*H*nA,   VAL_FLOOR)
-
-    # energy exchange strength
-    Q_over_Hrho = np.abs(Qh) / np.maximum(H * rhoh, VAL_FLOOR)
 
     dep_chi = np.maximum(nchi / np.maximum(nxeq_Th, VAL_FLOOR), VAL_FLOOR)
     dep_A   = np.maximum(nA   / np.maximum(naeq_Th, VAL_FLOOR), VAL_FLOOR)
 
     Gamma_chem_over_H = np.abs(Cchi) / (H * np.maximum(np.abs(nchi - nxeq_Th), VAL_FLOOR))
 
+    # --- energy-transfer diagnostics ---
+    rhoh_floor = np.maximum(rhoh, VAL_FLOOR)
+    Q_ann_over_Hrho = np.abs(Q_ann) / (H * rhoh_floor)
+    Q_dec_over_Hrho = np.abs(Q_dec) / (H * rhoh_floor)
+    Q_el_over_Hrho  = np.abs(Q_el)  / (H * rhoh_floor)
+
+    Gamma_el_over_H = np.abs(Gkin) / np.maximum(H, VAL_FLOOR)
+
     return {
         "x": xs, "T": T, "Th": Th, "H": H,
+        # number-changing rates
         "Gamma_xAA_over_H": Gamma_xAA_over_H,
         "Gamma_xSM_over_H": Gamma_xSM_over_H,
         "Gamma_Adec_over_H": Gamma_Adec_over_H,
         "Gamma_chem_over_H": Gamma_chem_over_H,
-
-        #"Q_el_over_Hrho": Q_el_over_Hrho,
-
-        "C_over_3Hn_chi": C_over_3Hn_chi,
-        "C_over_3Hn_A": C_over_3Hn_A,
-        "Q_over_Hrho": Q_over_Hrho,
         "dep_chi": dep_chi,
-        "dep_A": dep_A,
-
+        "dep_A":   dep_A,
         "nchi_over_nchieq": nchi / np.maximum(nxeq_Th, VAL_FLOOR),
-        "nA_over_nAeq": nA / np.maximum(naeq_Th, VAL_FLOOR),
+        "nA_over_nAeq":     nA   / np.maximum(naeq_Th, VAL_FLOOR),
+
+        # energy stuff
+        "Q_ann_over_Hrho": Q_ann_over_Hrho,
+        "Q_dec_over_Hrho": Q_dec_over_Hrho,
+        "Q_el_over_Hrho":  Q_el_over_Hrho,
+        "Gamma_el_over_H": Gamma_el_over_H,
+        "Q_total_over_Hrho": np.abs(Qh) / (H * rhoh_floor),
         "params": params,
     }
 
 
-def evolve(params, x_initial, x_final, y0, xs, log_space = False, rtol = 1e-7, atol=1e-14):
+
+def evolve(params, x_initial, x_final, y0, xs, log_space = True, rtol = 1e-7, atol=1e-14):
     if log_space:
         u0 = np.log(y0)
         sol = solve_ivp(rhs_logx, (x_initial, x_final), u0, args = (params,), t_eval=xs, method="Radau", rtol=rtol, atol=atol) #, max_step=0.5)
@@ -382,11 +489,12 @@ def evolve(params, x_initial, x_final, y0, xs, log_space = False, rtol = 1e-7, a
     return {"sol": soly, "x_arr": x_arr, "diag": diag}
 
 
-def s_SM(T, t_dep = False):
+def s_SM(T, t_dep = True):
     """SM entropy density"""
     return (2.0*np.pi**2/45.0) * gstars_SM(T, t_dep) * T**3
 
 def get_relic_abundance(Y, m):
     return 2.742e8 * m * Y
 
-def Y(n, T): return n / s_SM(T)
+def Y(n, T, tdep = True):
+    return n / s_SM(T, t_dep = tdep)
